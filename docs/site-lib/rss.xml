@@ -1,4 +1,54 @@
-<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0"><channel><title><![CDATA[原始数据]]></title><description><![CDATA[Obsidian digital garden]]></description><link>http://github.com/dylang/node-rss</link><image><url>site-lib/media/favicon.png</url><title>原始数据</title><link/></image><generator>Webpage HTML Export plugin for Obsidian</generator><lastBuildDate>Tue, 28 Jul 2026 09:21:13 GMT</lastBuildDate><atom:link href="site-lib/rss.xml" rel="self" type="application/rss+xml"/><pubDate>Tue, 28 Jul 2026 09:21:09 GMT</pubDate><ttl>60</ttl><dc:creator/><item><title><![CDATA[寻找工程契约（模块设计）]]></title><description><![CDATA[先建立一个小型模型，再从模型系统地产生契约。 名词表 ↓ 身份与所有权 ↓ 状态机 ↓ 端到端数据流 ↓ 失败/并发/边界矩阵 ↓ 类型、断言和契约测试
+<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0"><channel><title><![CDATA[原始数据]]></title><description><![CDATA[Obsidian digital garden]]></description><link>http://github.com/dylang/node-rss</link><image><url>site-lib/media/favicon.png</url><title>原始数据</title><link/></image><generator>Webpage HTML Export plugin for Obsidian</generator><lastBuildDate>Tue, 28 Jul 2026 11:48:58 GMT</lastBuildDate><atom:link href="site-lib/rss.xml" rel="self" type="application/rss+xml"/><pubDate>Tue, 28 Jul 2026 11:48:58 GMT</pubDate><ttl>60</ttl><dc:creator/><item><title><![CDATA[模块清理]]></title><description><![CDATA[不要这样：def shutdown(self): self.fs_tier.shutdown() # 抛异常 self.obj_tier.shutdown() # 永远不会执行 self.primary.shutdown() # 永远不会执行
+应该收集错误并尽量继续：def shutdown(self) -&gt; None: errors = [] for tier in reversed(self.secondary_tiers): try: tier.shutdown() except Exception as exc: errors.append(exc) try: self.primary_tier.shutdown() except Exception as exc: errors.append(exc) if errors: raise ExceptionGroup("Tiering shutdown failed", errors)
+但这只适用于彼此独立，或者即使前一步失败，后一步仍然安全的资源。tiering 中应当先阻止新工作，再等待 I/O 停止，然后释放底层内存：RUNNING ↓ 禁止新 submit
+CLOSING ↓ drain secondary jobs
+I/O_STOPPED ↓ 关闭 secondary tiers ↓ 释放 primary memoryview / mmap
+CLOSED
+如果 drain_jobs() 或停止线程失败，则不能确定 secondary 已经停止访问 primary memory。这时不能为了“清理彻底”而继续释放 mmap。也就是说：try: stop_and_drain_secondaries()
+except Exception: # primary memory 必须暂时保留 # 否则可能造成更严重的内存安全问题 report_incomplete_shutdown() return
+资源泄漏通常比释放仍在使用的内存更安全。调用两次不应造成新的错误：manager.shutdown()
+manager.shutdown() # 应该安全
+可以有明确状态：class Lifecycle(Enum): RUNNING = auto() CLOSING = auto() CLOSED = auto() CLOSE_FAILED = auto()
+入口先封闭：def shutdown(self) -&gt; None: if self._state is Lifecycle.CLOSED: return if self._state is Lifecycle.CLOSING: return self._state = Lifecycle.CLOSING ...
+但 CLOSE_FAILED 要记录“哪一步已经完成”，否则重试时可能重复关闭已经释放的资源。不能统一回答“重试”或“忽略”，要根据资源分类决定。shutdown 的结果最好不要只有“抛异常/不抛异常”两个信息，而是能表达：@dataclass
+class ShutdownResult: fully_closed: bool errors: list[BaseException] leaked_resources: list[str]
+不过在 Python 项目里，更常见的是：
+正常关闭：返回；
+可忽略的问题：记日志；
+关闭不完整且影响安全：抛出聚合异常；
+对象状态保留为 CLOSE_FAILED。
+]]></description><link>模块清理.html</link><guid isPermaLink="false">模块清理.md</guid><pubDate>Tue, 28 Jul 2026 11:36:40 GMT</pubDate></item><item><title><![CDATA[模块初始化]]></title><description><![CDATA[组件：
+依赖什么：
+创建什么资源：
+何时算 READY：
+初始化失败谁清理：
+正常关闭谁清理：
+例如 FS tier：组件：FileSystemTierManager
+依赖：primary_kv_view、block size、存储目录配置
+创建：文件映射器、异步 lookup manager、线程池
+READY：目录可用，线程池已启动，可以接受 submit
+失败清理：构造它的装配层
+正常关闭：自身 shutdown()
+这里有一条重要规则：
+创建资源的人，要么拥有它并负责关闭；要么立即把所有权明确移交给另一个对象。
+否则很容易出现 mmap 是 spec 创建的、primary 使用、manager 关闭，最后谁负责释放却不明确的情况。__init__ 最适合做：
+保存依赖；
+建立内部不变量；
+创建便宜且不容易失败的对象；
+让构造完成的对象立即可用。
+对于可能昂贵或容易失败的操作，例如：
+启动很多线程；
+连接远程存储；
+打开文件；
+分配大量内存；
+注册外部资源；
+可以考虑class TieringManager: @classmethod def create(cls, config): validated = validate(config) resources = allocate(validated) return assemble(resources)
+工厂的价值不是形式，而是它可以负责“事务式初始化”：created = []
+try: primary = create_primary() created.append(primary) secondary = create_secondary(primary) created.append(secondary) return create_manager(primary, secondary)
+except Exception: for component in reversed(created): component.shutdown() raise
+要做到：
+要么完整初始化并返回一个 READY 对象，要么清理已创建资源后失败；不要返回半初始化对象。
+]]></description><link>模块初始化.html</link><guid isPermaLink="false">模块初始化.md</guid><pubDate>Tue, 28 Jul 2026 11:32:48 GMT</pubDate></item><item><title><![CDATA[寻找工程契约（模块设计）]]></title><description><![CDATA[先建立一个小型模型，再从模型系统地产生契约。 名词表 ↓ 身份与所有权 ↓ 状态机 ↓ 端到端数据流 ↓ 失败/并发/边界矩阵 ↓ 类型、断言和契约测试
 不要试图在编码前一次想全。最实用的方法是：先写一段不带类名和函数名的系统故事，然后圈名词、动词和状态词。以 promotion 为例：
 调度器收到一个请求，使用 block key 查询 primary。primary 没有数据，于是查询 secondary。secondary 命中后，primary 为该 block 预留一个槽位。多个待传输 block 被合并成一个 job。job 完成后，primary 将这些 block 发布为可用。
 从中提取：但并非每个名词都需要变成数据结构。接下来用几个问题筛选。问：“我们以后是否需要单独指出它？”

@@ -78,32 +78,11 @@
 <main>
   <h1>Talks on Development Experience</h1>
   <p class="subtitle">关于开发经验的一些记录与思考</p>
+  <!-- 下面的列表只是本地预览用的占位；部署时由
+       .github/scripts/build_index.py 自动生成并替换。 -->
   <ul class="articles" id="article-list">
     <li><a href="寻找工程契约（模块设计）.html">寻找工程契约（模块设计）</a></li>
   </ul>
 </main>
-<script>
-  // 从 Obsidian 导出的 metadata.json 动态读取文章列表；
-  // 读取失败时保留上面的静态列表作为兜底。
-  fetch("site-lib/metadata.json")
-    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
-    .then(function (meta) {
-      var files = (meta.shownInTree || []).filter(function (f) {
-        return f.endsWith(".html") && f !== "index.html";
-      });
-      if (files.length === 0) return;
-      var list = document.getElementById("article-list");
-      list.innerHTML = "";
-      files.forEach(function (f) {
-        var li = document.createElement("li");
-        var a = document.createElement("a");
-        a.href = encodeURI(f);
-        a.textContent = f.replace(/\.html$/, "");
-        li.appendChild(a);
-        list.appendChild(li);
-      });
-    })
-    .catch(function () { /* 保留静态兜底列表 */ });
-</script>
 </body>
 </html>
